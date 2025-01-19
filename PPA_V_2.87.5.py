@@ -12,9 +12,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.io as pio  # For to_image()
-from fpdf import FPDF    # For PDF generation
-import tempfile          # For creating temp image files
+import plotly.io as pio  
+from fpdf import FPDF    
+import tempfile          
 import asyncio
 import os
 import time
