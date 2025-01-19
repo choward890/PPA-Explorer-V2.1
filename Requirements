@@ -1,1 +1,6 @@
-nan
+streamlit
+pandas
+numpy
+plotly
+fpdf
+asyncio
