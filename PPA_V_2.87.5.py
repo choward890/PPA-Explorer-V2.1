@@ -11,7 +11,7 @@ Updates: adding in audio tone for when box swap gets displayed
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly
+#import plotly
 import plotly.graph_objects as go
 import plotly.io as pio  # For to_image()
 from fpdf import FPDF    # For PDF generation
