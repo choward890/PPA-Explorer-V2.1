@@ -4,6 +4,7 @@
 Created on Wed Oct 17 11:29:15 2024
 
 Updates: adding in clear data button
+updating to stop plot flashing when data is plotted and enabling live analysis
 
 @author: coltonhoward
 """
@@ -305,20 +306,14 @@ if uploaded_file is not None:
     if pause_button:
         st.session_state.paused = True
         st.session_state.running = False
-        st.session_state.analysis_mode = False
 
     if resume_button:
         if st.session_state.paused:
             st.session_state.running = True
             st.session_state.paused = False
-            st.session_state.analysis_mode = False
 
     if analysis_button:
-        st.session_state.running = False
-        st.session_state.paused = True
-        st.session_state.analysis_mode = True
-        st.session_state["analysis_figs"].clear()
-        st.session_state["analysis_plots_created"] = False
+        st.session_state.analysis_mode = not st.session_state.analysis_mode
 
     # ------------------ Utility & calculation functions ------------------
     def perform_calculations_on_new_data(x_new, y1_new, y3_new, y4_new, y5_new):
@@ -675,185 +670,196 @@ if uploaded_file is not None:
 
         render_box_swap_notice()
 
-    @st.fragment(run_every=st.session_state.delay / 1000.0)
-    def live_region():
-        if st.session_state.running and not st.session_state.analysis_mode:
-            advance_simulation_step()
+    def build_analysis_figures():
+        if st.session_state.x_full.empty or st.session_state.y5_full.empty:
+            return []
 
-        render_live_panels()
+        analysis_figs = []
+        param_events = st.session_state.get("param_change_events", [])
 
-    live_region()
+        prop_diff_series = st.session_state.calc_total_proppant_full - st.session_state.y5_full
+        fig_diff = go.Figure()
+        fig_diff.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=prop_diff_series,
+            name='Prop Difference',
+            line=dict(color=delta_prop_color)
+        ))
 
-    # ------------------ Analysis Mode / Plots ------------------
-    if st.session_state.analysis_mode:
+        px_diff, py_diff, pt_diff = [], [], []
+        for evt in param_events:
+            evt_x = evt["x"]
+            idx = (st.session_state.x_full - evt_x).abs().argmin()
+            y_val = prop_diff_series.iloc[idx]
+            px_diff.append(st.session_state.x_full.iloc[idx])
+            py_diff.append(y_val)
+            pt_diff.append(f"{evt['param']} -> {evt['new_val']}")
+
+        if px_diff:
+            fig_diff.add_trace(go.Scatter(
+                x=px_diff,
+                y=py_diff,
+                mode='markers',
+                text=pt_diff,
+                hovertemplate='%{text}<extra></extra>',
+                marker=dict(symbol='diamond', color='red', size=10),
+                name='Calc Changes'
+            ))
+
+        fig_diff.update_layout(
+            title='Difference Between Actual Prop Pumped and Design Prop Pumped',
+            xaxis=dict(range=[x_min, x_max]),
+            xaxis_title='Time',
+            yaxis_title='Difference (lbs)',
+            autosize=True,
+            margin=dict(l=40, r=40, t=70, b=40),
+            legend=dict(
+                orientation='h',
+                yanchor='bottom',
+                y=1.15,
+                xanchor='center',
+                x=0.5
+            )
+        )
+        analysis_figs.append(fig_diff)
+
+        fig_total_prop = go.Figure()
+        fig_total_prop.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.y5_full,
+            name='Design Prop Pumped',
+            line=dict(color=total_prop_color)
+        ))
+        fig_total_prop.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.calc_total_proppant_full,
+            name='Actual Prop Pumped',
+            line=dict(color=total_calc_prop_color)
+        ))
+
+        px_tot, py_tot, pt_tot = [], [], []
+        for evt in param_events:
+            evt_x = evt["x"]
+            idx = (st.session_state.x_full - evt_x).abs().argmin()
+            y_val = st.session_state.calc_total_proppant_full.iloc[idx]
+            px_tot.append(st.session_state.x_full.iloc[idx])
+            py_tot.append(y_val)
+            pt_tot.append(f"{evt['param']} -> {evt['new_val']}")
+
+        if px_tot:
+            fig_total_prop.add_trace(go.Scatter(
+                x=px_tot,
+                y=py_tot,
+                mode='markers',
+                text=pt_tot,
+                hovertemplate='%{text}<extra></extra>',
+                marker=dict(symbol='diamond', color='red', size=10),
+                name='Calc Changes'
+            ))
+
+        fig_total_prop.update_layout(
+            title='Time vs Design Prop Pumped vs Actual Prop Pumped',
+            xaxis=dict(range=[x_min, x_max]),
+            xaxis_title='Time',
+            yaxis_title='Proppant (lbs)',
+            autosize=True,
+            margin=dict(l=40, r=40, t=80, b=40),
+            legend=dict(
+                orientation='h',
+                yanchor='bottom',
+                y=1.10,
+                xanchor='center',
+                x=0.5
+            )
+        )
+        analysis_figs.append(fig_total_prop)
+
+        fig_prop_conc = go.Figure()
+        fig_prop_conc.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.calc_ppa_smooth_full,
+            name='Calculated Prop Conc',
+            line=dict(color=calc_prop_color)
+        ))
+        fig_prop_conc.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.y6_full,
+            name='Design Prop Conc',
+            line=dict(color='green')
+        ))
+
+        px_conc, py_conc, pt_conc = [], [], []
+        for evt in param_events:
+            evt_x = evt["x"]
+            idx = (st.session_state.x_full - evt_x).abs().argmin()
+            y_val = st.session_state.calc_ppa_smooth_full.iloc[idx]
+            px_conc.append(st.session_state.x_full.iloc[idx])
+            py_conc.append(y_val)
+            pt_conc.append(f"{evt['param']} -> {evt['new_val']}")
+
+        if px_conc:
+            fig_prop_conc.add_trace(go.Scatter(
+                x=px_conc,
+                y=py_conc,
+                mode='markers',
+                text=pt_conc,
+                hovertemplate='%{text}<extra></extra>',
+                marker=dict(symbol='diamond', color='red', size=10),
+                name='Calc Changes'
+            ))
+
+        fig_prop_conc.update_layout(
+            title='Time vs Prop Conc (Calc & Design',
+            xaxis=dict(range=[x_min, x_max]),
+            xaxis_title='Time',
+            yaxis_title='Concentration',
+            autosize=True,
+            margin=dict(l=40, r=40, t=80, b=40),
+            legend=dict(
+                orientation='h',
+                yanchor='bottom',
+                y=1.10,
+                xanchor='center',
+                x=0.5
+            )
+        )
+        analysis_figs.append(fig_prop_conc)
+
+        return analysis_figs
+
+    def render_analysis_panels():
+        if not st.session_state.analysis_mode:
+            analysis_placeholder.empty()
+            return
+
         with analysis_placeholder.container():
             st.header("Data Analysis")
-            if not st.session_state["analysis_plots_created"]:
-                # 1) Plot the difference
-                prop_diff_series = st.session_state.calc_total_proppant_full - st.session_state.y5_full
-                fig_diff = go.Figure()
-                fig_diff.add_trace(go.Scatter(
-                    x=st.session_state.x_full,
-                    y=prop_diff_series,
-                    name='Prop Difference',
-                    line=dict(color=delta_prop_color)
-                ))
+            analysis_figs = build_analysis_figures()
+            st.session_state["analysis_figs"] = analysis_figs
+            st.session_state["analysis_plots_created"] = bool(analysis_figs)
 
-                # param-change markers
-                param_events = st.session_state.get("param_change_events", [])
-                px_diff, py_diff, pt_diff = [], [], []
-                for evt in param_events:
-                    evt_x = evt["x"]
-                    idx = (st.session_state.x_full - evt_x).abs().argmin()
-                    y_val = prop_diff_series.iloc[idx]
-                    px_diff.append(st.session_state.x_full.iloc[idx])
-                    py_diff.append(y_val)
-                    pt_diff.append(f"{evt['param']} -> {evt['new_val']}")
-
-                if px_diff:
-                    fig_diff.add_trace(go.Scatter(
-                        x=px_diff,
-                        y=py_diff,
-                        mode='markers',
-                        text=pt_diff,
-                        hovertemplate='%{text}<extra></extra>',
-                        marker=dict(symbol='diamond', color='red', size=10),
-                        name='Calc Changes'
-                    ))
-
-                fig_diff.update_layout(
-                    title='Difference Between Actual Prop Pumped and Design Prop Pumped',
-                    xaxis=dict(range=[x_min, x_max]),
-                    xaxis_title='Time',
-                    yaxis_title='Difference (lbs)',
-                    autosize=True,
-                    margin=dict(l=40, r=40, t=70, b=40),
-                    legend=dict(
-                        orientation='h',
-                        yanchor='bottom',
-                        y=1.15,
-                        xanchor='center',
-                        x=0.5
-                    )
-                )
-                st.session_state["analysis_figs"].append(fig_diff)
-
-                # 2) Total Prop (Design vs Actual)
-                fig_total_prop = go.Figure()
-                fig_total_prop.add_trace(go.Scatter(
-                    x=st.session_state.x_full,
-                    y=st.session_state.y5_full,
-                    name='Design Prop Pumped',
-                    line=dict(color=total_prop_color)
-                ))
-                fig_total_prop.add_trace(go.Scatter(
-                    x=st.session_state.x_full,
-                    y=st.session_state.calc_total_proppant_full,
-                    name='Actual Prop Pumped',
-                    line=dict(color=total_calc_prop_color)
-                ))
-
-                px_tot, py_tot, pt_tot = [], [], []
-                for evt in param_events:
-                    evt_x = evt["x"]
-                    idx = (st.session_state.x_full - evt_x).abs().argmin()
-                    y_val = st.session_state.calc_total_proppant_full.iloc[idx]
-                    px_tot.append(st.session_state.x_full.iloc[idx])
-                    py_tot.append(y_val)
-                    pt_tot.append(f"{evt['param']} -> {evt['new_val']}")
-
-                if px_tot:
-                    fig_total_prop.add_trace(go.Scatter(
-                        x=px_tot,
-                        y=py_tot,
-                        mode='markers',
-                        text=pt_tot,
-                        hovertemplate='%{text}<extra></extra>',
-                        marker=dict(symbol='diamond', color='red', size=10),
-                        name='Calc Changes'
-                    ))
-
-                fig_total_prop.update_layout(
-                    title='Time vs Design Prop Pumped vs Actual Prop Pumped',
-                    xaxis=dict(range=[x_min, x_max]),
-                    xaxis_title='Time',
-                    yaxis_title='Proppant (lbs)',
-                    autosize=True,
-                    margin=dict(l=40, r=40, t=80, b=40),
-                    legend=dict(
-                        orientation='h',
-                        yanchor='bottom',
-                        y=1.10,
-                        xanchor='center',
-                        x=0.5
-                    )
-                )
-                st.session_state["analysis_figs"].append(fig_total_prop)
-
-                # 3) Prop Conc
-                fig_prop_conc = go.Figure()
-                fig_prop_conc.add_trace(go.Scatter(
-                    x=st.session_state.x_full,
-                    y=st.session_state.calc_ppa_smooth_full,
-                    name='Calculated Prop Conc',
-                    line=dict(color=calc_prop_color)
-                ))
-                fig_prop_conc.add_trace(go.Scatter(
-                    x=st.session_state.x_full,
-                    y=st.session_state.y6_full,
-                    name='Design Prop Conc',
-                    line=dict(color='green')
-                ))
-
-                px_conc, py_conc, pt_conc = [], [], []
-                for evt in param_events:
-                    evt_x = evt["x"]
-                    idx = (st.session_state.x_full - evt_x).abs().argmin()
-                    y_val = st.session_state.calc_ppa_smooth_full.iloc[idx]
-                    px_conc.append(st.session_state.x_full.iloc[idx])
-                    py_conc.append(y_val)
-                    pt_conc.append(f"{evt['param']} -> {evt['new_val']}")
-
-                if px_conc:
-                    fig_prop_conc.add_trace(go.Scatter(
-                        x=px_conc,
-                        y=py_conc,
-                        mode='markers',
-                        text=pt_conc,
-                        hovertemplate='%{text}<extra></extra>',
-                        marker=dict(symbol='diamond', color='red', size=10),
-                        name='Calc Changes'
-                    ))
-
-                fig_prop_conc.update_layout(
-                    title='Time vs Prop Conc (Calc & Design',
-                    xaxis=dict(range=[x_min, x_max]),
-                    xaxis_title='Time',
-                    yaxis_title='Concentration',
-                    autosize=True,
-                    margin=dict(l=40, r=40, t=80, b=40),
-                    legend=dict(
-                        orientation='h',
-                        yanchor='bottom',
-                        y=1.10,
-                        xanchor='center',
-                        x=0.5
-                    )
-                )
-                st.session_state["analysis_figs"].append(fig_prop_conc)
-
-                st.session_state["analysis_plots_created"] = True
+            if not analysis_figs:
+                st.write("Analysis charts will appear once the simulation has plotted data.")
+                return
 
             analysis_chart_keys = [
                 "analysis_prop_diff",
                 "analysis_total_prop",
                 "analysis_prop_conc",
             ]
-            for idx, fig_analysis in enumerate(st.session_state["analysis_figs"]):
+            for idx, fig_analysis in enumerate(analysis_figs):
                 chart_key = analysis_chart_keys[idx] if idx < len(analysis_chart_keys) else f"analysis_chart_{idx}"
                 st.plotly_chart(fig_analysis, use_container_width=True, key=chart_key)
-    else:
-        analysis_placeholder.empty()
+
+    @st.fragment(run_every=st.session_state.delay / 1000.0)
+    def live_region():
+        if st.session_state.running:
+            advance_simulation_step()
+
+        render_live_panels()
+        render_analysis_panels()
+
+    live_region()
 
     # ------------------ CSV Download ------------------
     export_data = pd.DataFrame({
