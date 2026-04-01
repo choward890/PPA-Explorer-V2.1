@@ -15,7 +15,6 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from fpdf import FPDF    
 import tempfile          
-import asyncio
 import os
 import io
 import time
@@ -101,6 +100,9 @@ def clear_all_data():
     st.session_state.index = 0
     st.session_state.last_fig = None
     st.session_state.last_full_boxes_consumed_calc = 0
+    st.session_state["box_swap_until"] = 0.0
+    st.session_state["box_swap_audio_nonce"] = 0
+    st.session_state["box_swap_audio_rendered_nonce"] = 0
 
     # Clear param-change events
     st.session_state["param_change_events"] = []
@@ -171,6 +173,12 @@ if uploaded_file is not None:
         st.session_state.analysis_mode = False
     if 'last_full_boxes_consumed_calc' not in st.session_state:
         st.session_state['last_full_boxes_consumed_calc'] = 0
+    if "box_swap_until" not in st.session_state:
+        st.session_state["box_swap_until"] = 0.0
+    if "box_swap_audio_nonce" not in st.session_state:
+        st.session_state["box_swap_audio_nonce"] = 0
+    if "box_swap_audio_rendered_nonce" not in st.session_state:
+        st.session_state["box_swap_audio_rendered_nonce"] = 0
 
     if "analysis_figs" not in st.session_state:
         st.session_state["analysis_figs"] = []
@@ -288,6 +296,9 @@ if uploaded_file is not None:
         for var in variables_to_initialize:
             st.session_state[var] = pd.Series(dtype=float)
         st.session_state['last_full_boxes_consumed_calc'] = 0
+        st.session_state["box_swap_until"] = 0.0
+        st.session_state["box_swap_audio_nonce"] = 0
+        st.session_state["box_swap_audio_rendered_nonce"] = 0
         st.session_state["analysis_figs"].clear()
         st.session_state["analysis_plots_created"] = False
 
@@ -401,333 +412,277 @@ if uploaded_file is not None:
                 '''
                 cols[i].markdown(box_html, unsafe_allow_html=True)
 
-    async def show_box_swap_message():
-        # Show the "Box Swap" text
-        box_swap_placeholder.markdown("<h2 style='text-align: center; color: red;'>Box Swap</h2>", unsafe_allow_html=True)
+    def colored_metric(label, value, color):
+        return f"""
+        <div style="text-align: center;">
+            <p style="margin: 0; font-size: 16px; color: {color};">{label}</p>
+            <p style="margin: 0; font-size: 24px; color: {color}; font-weight: bold;">{value}</p>
+        </div>
+        """
 
-        # Immediately play a beep sound via JavaScript
-        st.markdown(
-            """
-            <script>
-            (function() {
-                var beep = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
-                beep.play();
-            })();
-            </script>
-            """,
-            unsafe_allow_html=True
+    def get_current_metrics():
+        if st.session_state.y5_full.empty:
+            return None
+
+        current_calc_total_proppant = st.session_state.calc_total_proppant_full.iloc[-1]
+        current_y5_value = st.session_state.y5_full.iloc[-1]
+        current_cumulative_clean_vol = (
+            st.session_state.total_calc_clean_volume_full.iloc[-1]
+            if not st.session_state.total_calc_clean_volume_full.empty
+            else 0.0
         )
 
-        # Wait 2 seconds, then remove the "Box Swap" text
-        await asyncio.sleep(2)
-        box_swap_placeholder.empty()
+        return {
+            "calc_ppa_smooth": st.session_state.calc_ppa_smooth_full.iloc[-1],
+            "calc_clean_rate": st.session_state.calc_clean_rate_full.iloc[-1],
+            "y3": st.session_state.y3_full.iloc[-1],
+            "y4": st.session_state.y4_full.iloc[-1],
+            "y5": current_y5_value,
+            "calc_total_proppant": current_calc_total_proppant,
+            "y6": st.session_state.y6_full.iloc[-1],
+            "cumulative_clean_vol": current_cumulative_clean_vol,
+            "prop_diff": current_calc_total_proppant - current_y5_value,
+        }
 
-    # ------------------ Main Loop for plotting data in increments ------------------
-    async def update_plot():
-        while st.session_state.running and st.session_state.index < len(data):
-            start_index = st.session_state.index
-            end_index = st.session_state.index + index_increment
-            end_index = min(end_index, len(data))
+    def advance_simulation_step():
+        if not st.session_state.running or st.session_state.index >= len(data):
+            st.session_state.running = False
+            return False
 
-            x_new = data[x_column].iloc[start_index:end_index].reset_index(drop=True)
-            y1_new = data[y1_column].iloc[start_index:end_index].reset_index(drop=True)
-            y3_new = data[y3_column].iloc[start_index:end_index].reset_index(drop=True)
-            y4_new = data[y4_column].iloc[start_index:end_index].reset_index(drop=True)
-            y5_new = data[y5_column].iloc[start_index:end_index].reset_index(drop=True)
-            y6_new = data[y6_column].iloc[start_index:end_index].reset_index(drop=True)
+        start_index = st.session_state.index
+        end_index = min(start_index + int(st.session_state.index_increment), len(data))
 
-            current_calc_total_proppant = perform_calculations_on_new_data(
-                x_new, y1_new, y3_new, y4_new, y5_new
-            )
-            st.session_state.y6_full = pd.concat([st.session_state.y6_full, y6_new], ignore_index=True)
-            st.session_state.index = end_index
+        x_new = data[x_column].iloc[start_index:end_index].reset_index(drop=True)
+        y1_new = data[y1_column].iloc[start_index:end_index].reset_index(drop=True)
+        y3_new = data[y3_column].iloc[start_index:end_index].reset_index(drop=True)
+        y4_new = data[y4_column].iloc[start_index:end_index].reset_index(drop=True)
+        y5_new = data[y5_column].iloc[start_index:end_index].reset_index(drop=True)
+        y6_new = data[y6_column].iloc[start_index:end_index].reset_index(drop=True)
 
-            # Build the main figure
-            fig = go.Figure()
+        perform_calculations_on_new_data(x_new, y1_new, y3_new, y4_new, y5_new)
+        st.session_state.y6_full = pd.concat([st.session_state.y6_full, y6_new], ignore_index=True)
+        st.session_state.index = end_index
 
-            # 1) Hidden y1_full, so no trace for Actual Prop
-            # 2) Calc Prop Conc
-            fig.add_trace(go.Scatter(
-                x=st.session_state.x_full,
-                y=st.session_state.calc_ppa_smooth_full,
-                name='Calc Prop Conc',
-                line=dict(color=calc_prop_color),
-                yaxis='y1',
-                hovertemplate='%{y:.2f}'
-            ))
-            # 3) Design/Screw Prop Conc
-            fig.add_trace(go.Scatter(
-                x=st.session_state.x_full,
-                y=st.session_state.y6_full,
-                name='Design Prop Conc',
-                line=dict(color='green'),
-                yaxis='y1',
-                hovertemplate='%{y:.2f}'
-            ))
-            # 4) Calc Clean Rate
-            fig.add_trace(go.Scatter(
-                x=st.session_state.x_full,
-                y=st.session_state.calc_clean_rate_full,
-                name='Calc Clean Rate',
-                line=dict(color=y2_color),
-                yaxis='y3'
-            ))
-            # 5) Slurry Rate
-            fig.add_trace(go.Scatter(
-                x=st.session_state.x_full,
-                y=st.session_state.y3_full,
-                name=y3_column,
-                line=dict(color=y3_color),
-                yaxis='y3'
-            ))
-            # 6) Pressure
-            fig.add_trace(go.Scatter(
-                x=st.session_state.x_full,
-                y=st.session_state.y4_full,
-                name=y4_column,
-                line=dict(color=y4_color),
-                yaxis='y4'
-            ))
-
-            # Param-change markers
-            param_events = st.session_state.get("param_change_events", [])
-            param_event_x = []
-            param_event_y = []
-            param_event_text = []
-            for evt in param_events:
-                evt_x = evt["x"]
-                idx = (st.session_state.x_full - evt_x).abs().argmin()
-                y_val = st.session_state.calc_ppa_smooth_full.iloc[idx]
-                param_event_x.append(st.session_state.x_full.iloc[idx])
-                param_event_y.append(y_val)
-                param_event_text.append(f"{evt['param']} -> {evt['new_val']}")
-
-            if param_event_x:
-                fig.add_trace(go.Scatter(
-                    x=param_event_x,
-                    y=param_event_y,
-                    mode='markers',
-                    text=param_event_text,
-                    hovertemplate='%{text}<extra></extra>',
-                    marker=dict(symbol='diamond', color='red', size=10),
-                    name='Calc Changes'
-                ))
-
-            fig.update_layout(
-                xaxis=dict(domain=[0.05, 0.95], range=[x_min, x_max]),
-                yaxis=dict(
-                    title=dict(text = "Prop Conc", font = dict(color='green')),
-                    range=[0, y1_max],
-                    showgrid=True,
-                    # titlefont=dict(color='green'),
-                    tickfont=dict(color='green')     
-                ),
-                yaxis3=dict(
-                    title=dict(
-                        text="Rate (bpm)",
-                        font=dict(color=y3_color)
-                    ),
-                    # titlefont=dict(color=y3_color),
-                    tickfont=dict(color=y3_color),
-                    anchor='free',
-                    overlaying='y',
-                    side='right',
-                    position=0.9,
-                    range=[0, y3_max],
-                    showgrid=False,
-                ),
-                yaxis4=dict(
-                    title=dict(
-                        text=y4_column,
-                        font=dict(color=y4_color)
-                    ),
-                    # titlefont=dict(color=y4_color),
-                    tickfont=dict(color=y4_color),
-                    anchor='free',
-                    overlaying='y',
-                    side='right',
-                    position=0.95,
-                    range=[0, y4_max],
-                    showgrid=False,
-                ),
-                legend=dict(
-                    x=0.5,
-                    y=1.15,
-                    xanchor='center',
-                    orientation='h'
-                ),
-                margin=dict(l=0, r=0, t=30, b=10),
-                autosize=True,
-            )
-
-            plot_placeholder.plotly_chart(fig, use_container_width=True)
-            st.session_state.last_fig = fig
-
-            # Show current metrics
-            current_calc_ppa_smooth_value = st.session_state.calc_ppa_smooth_full.iloc[-1]
-            current_calc_clean_rate_value = st.session_state.calc_clean_rate_full.iloc[-1]
-            current_y3_value = st.session_state.y3_full.iloc[-1]
-            current_y4_value = st.session_state.y4_full.iloc[-1]
-            current_y5_value = st.session_state.y5_full.iloc[-1]
-            current_calc_total_proppant = st.session_state.calc_total_proppant_full.iloc[-1]
-            current_y6_value = st.session_state.y6_full.iloc[-1]
-            if not st.session_state.total_calc_clean_volume_full.empty:
-                current_cumulative_clean_vol = st.session_state.total_calc_clean_volume_full.iloc[-1]
-            else:
-                current_cumulative_clean_vol = 0.0
-
-            prop_diff = current_calc_total_proppant - current_y5_value
-
-            with numerical_values_placeholder.container():
-                cols = st.columns(9)
-
-                def colored_metric(label, value, color):
-                    return f"""
-                    <div style="text-align: center;">
-                        <p style="margin: 0; font-size: 16px; color: {color};">{label}</p>
-                        <p style="margin: 0; font-size: 24px; color: {color}; font-weight: bold;">{value}</p>
-                    </div>
-                    """
-
-                cols[0].markdown(colored_metric("Calc Prop Conc (ppa)", f"{current_calc_ppa_smooth_value:.2f}", "orange"), unsafe_allow_html=True)
-                cols[1].markdown(colored_metric("Design Prop Conc (ppa)", f"{current_y6_value:.2f}", "green"), unsafe_allow_html=True)
-                cols[2].markdown(colored_metric("Calc Clean Rate (bpm)", f"{current_calc_clean_rate_value:.2f}", "#17becf"), unsafe_allow_html=True)
-                cols[3].markdown(colored_metric("Total Clean Vol (bbl)", f"{current_cumulative_clean_vol:.0f}", cum_clean_vol_color), unsafe_allow_html=True)
-                cols[4].markdown(colored_metric(f"{y3_column} (bpm)", f"{current_y3_value:.2f}", "blue"), unsafe_allow_html=True)
-                cols[5].markdown(colored_metric(f"{y4_column} (psi)", f"{current_y4_value:.0f}", "red"), unsafe_allow_html=True)
-                cols[6].markdown(colored_metric("Design Prop Pumped (lbs)", f"{current_y5_value:.0f}", "#808080"), unsafe_allow_html=True)
-                cols[7].markdown(colored_metric("Actual Prop Pumped (lbs)", f"{current_calc_total_proppant:,.0f}", "orange"), unsafe_allow_html=True)
-                cols[8].markdown(colored_metric("Ahead / Behind (lbs)", f"{prop_diff:,.0f}", "#9FE2BF"), unsafe_allow_html=True)
-
-            # CSV (Design) Boxes
-            total_proppant_max_csv = data[y5_column].max()
-            total_boxes_csv = int(np.ceil(total_proppant_max_csv / 25000))
-            total_boxes_csv = max(1, total_boxes_csv)
-            boxes_consumed_csv = current_y5_value / 25000
-            num_boxes_to_display_csv = min(total_boxes_csv, 30)
-
-            if st.session_state['show_csv_boxes']:
-                display_boxes(
-                    boxes_consumed_csv,
-                    total_boxes_csv,
-                    num_boxes_to_display_csv,
-                    label="Design (CSV)",
-                    container=boxes_placeholder_csv
-                )
-            else:
-                boxes_placeholder_csv.empty()
-
-            # Calculated Boxes
-            total_proppant_max_calc = st.session_state.calc_total_proppant_full.max()
-            total_boxes_calc = int(np.ceil(total_proppant_max_calc / 25000))
-            total_boxes_calc = max(1, total_boxes_calc)
-            boxes_consumed_calc = current_calc_total_proppant / 25000
-            num_boxes_to_display_calc = max(num_boxes_to_display_csv, min(total_boxes_calc, 30))
-
-            if st.session_state['show_calc_boxes']:
-                display_boxes(
-                    boxes_consumed_calc,
-                    total_boxes_calc,
-                    num_boxes_to_display_calc,
-                    label="Calculated",
-                    container=boxes_placeholder_calc
-                )
-            else:
-                boxes_placeholder_calc.empty()
-
-            full_boxes_consumed_calc = int(boxes_consumed_calc)
-            if full_boxes_consumed_calc > st.session_state['last_full_boxes_consumed_calc']:
-                st.session_state['last_full_boxes_consumed_calc'] = full_boxes_consumed_calc
-                if st.session_state['show_calc_boxes']:
-                    asyncio.create_task(show_box_swap_message())
-
-            await asyncio.sleep(delay / 1000)
-
-            if st.session_state.paused or st.session_state.analysis_mode:
-                break
+        current_calc_total_proppant = st.session_state.calc_total_proppant_full.iloc[-1]
+        full_boxes_consumed_calc = int(current_calc_total_proppant / 25000)
+        if full_boxes_consumed_calc > st.session_state['last_full_boxes_consumed_calc']:
+            st.session_state['last_full_boxes_consumed_calc'] = full_boxes_consumed_calc
+            st.session_state["box_swap_until"] = time.time() + 2
+            st.session_state["box_swap_audio_nonce"] += 1
 
         if st.session_state.index >= len(data):
             st.session_state.running = False
 
-    # If running, do the live update
-    if st.session_state.running:
-        asyncio.run(update_plot())
-    else:
-        # If not running, show the last figure (if any)
-        if st.session_state.last_fig is not None:
-            plot_placeholder.plotly_chart(st.session_state.last_fig, use_container_width=True)
-            if not st.session_state.y5_full.empty:
-                current_calc_ppa_smooth_value = st.session_state.calc_ppa_smooth_full.iloc[-1]
-                current_calc_clean_rate_value = st.session_state.calc_clean_rate_full.iloc[-1]
-                current_y3_value = st.session_state.y3_full.iloc[-1]
-                current_y4_value = st.session_state.y4_full.iloc[-1]
-                current_y5_value = st.session_state.y5_full.iloc[-1]
-                current_calc_total_proppant = st.session_state.calc_total_proppant_full.iloc[-1]
-                current_y6_value = st.session_state.y6_full.iloc[-1]
-                if not st.session_state.total_calc_clean_volume_full.empty:
-                    current_cumulative_clean_vol = st.session_state.total_calc_clean_volume_full.iloc[-1]
-                else:
-                    current_cumulative_clean_vol = 0.0
+        return True
 
-                prop_diff = current_calc_total_proppant - current_y5_value
+    def build_main_figure():
+        if st.session_state.x_full.empty:
+            return None
 
-                with numerical_values_placeholder.container():
-                    cols = st.columns(9)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.calc_ppa_smooth_full,
+            name='Calc Prop Conc',
+            line=dict(color=calc_prop_color),
+            yaxis='y1',
+            hovertemplate='%{y:.2f}'
+        ))
+        fig.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.y6_full,
+            name='Design Prop Conc',
+            line=dict(color='green'),
+            yaxis='y1',
+            hovertemplate='%{y:.2f}'
+        ))
+        fig.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.calc_clean_rate_full,
+            name='Calc Clean Rate',
+            line=dict(color=y2_color),
+            yaxis='y3'
+        ))
+        fig.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.y3_full,
+            name=y3_column,
+            line=dict(color=y3_color),
+            yaxis='y3'
+        ))
+        fig.add_trace(go.Scatter(
+            x=st.session_state.x_full,
+            y=st.session_state.y4_full,
+            name=y4_column,
+            line=dict(color=y4_color),
+            yaxis='y4'
+        ))
 
-                    def colored_metric(label, value, color):
-                        return f"""
-                        <div style="text-align: center;">
-                            <p style="margin: 0; font-size: 16px; color: {color};">{label}</p>
-                            <p style="margin: 0; font-size: 24px; color: {color}; font-weight: bold;">{value}</p>
-                        </div>
-                        """
+        param_events = st.session_state.get("param_change_events", [])
+        param_event_x = []
+        param_event_y = []
+        param_event_text = []
+        for evt in param_events:
+            evt_x = evt["x"]
+            idx = (st.session_state.x_full - evt_x).abs().argmin()
+            y_val = st.session_state.calc_ppa_smooth_full.iloc[idx]
+            param_event_x.append(st.session_state.x_full.iloc[idx])
+            param_event_y.append(y_val)
+            param_event_text.append(f"{evt['param']} -> {evt['new_val']}")
 
-                    cols[0].markdown(colored_metric("Calc Prop Conc (ppa)", f"{current_calc_ppa_smooth_value:.2f}", "orange"), unsafe_allow_html=True)
-                    cols[1].markdown(colored_metric("Design Prop Conc (ppa)", f"{current_y6_value:.2f}", "green"), unsafe_allow_html=True)
-                    cols[2].markdown(colored_metric("Calc Clean Rate (bpm)", f"{current_calc_clean_rate_value:.2f}", "#17becf"), unsafe_allow_html=True)
-                    cols[3].markdown(colored_metric("Total Clean Vol (bbl)", f"{current_cumulative_clean_vol:.0f}", cum_clean_vol_color), unsafe_allow_html=True)
-                    cols[4].markdown(colored_metric(f"{y3_column} (bpm)", f"{current_y3_value:.2f}", "blue"), unsafe_allow_html=True)
-                    cols[5].markdown(colored_metric(f"{y4_column} (psi)", f"{current_y4_value:.0f}", "red"), unsafe_allow_html=True)
-                    cols[6].markdown(colored_metric("Design Prop Pumped (lbs)", f"{current_y5_value:.0f}", "#808080"), unsafe_allow_html=True)
-                    cols[7].markdown(colored_metric("Actual Prop Pumped (lbs)", f"{current_calc_total_proppant:,.0f}", "orange"), unsafe_allow_html=True)
-                    cols[8].markdown(colored_metric("Ahead / Behind (lbs)", f"{prop_diff:,.0f}", "#9FE2BF"), unsafe_allow_html=True)
+        if param_event_x:
+            fig.add_trace(go.Scatter(
+                x=param_event_x,
+                y=param_event_y,
+                mode='markers',
+                text=param_event_text,
+                hovertemplate='%{text}<extra></extra>',
+                marker=dict(symbol='diamond', color='red', size=10),
+                name='Calc Changes'
+            ))
 
-                # Show boxes if checked
-                total_proppant_max_csv = data[y5_column].max()
-                total_boxes_csv = int(np.ceil(total_proppant_max_csv / 25000))
-                total_boxes_csv = max(1, total_boxes_csv)
-                boxes_consumed_csv = current_y5_value / 25000
-                num_boxes_to_display_csv = min(total_boxes_csv, 30)
+        fig.update_layout(
+            xaxis=dict(domain=[0.05, 0.95], range=[x_min, x_max]),
+            yaxis=dict(
+                title=dict(text="Prop Conc", font=dict(color='green')),
+                range=[0, y1_max],
+                showgrid=True,
+                tickfont=dict(color='green')
+            ),
+            yaxis3=dict(
+                title=dict(
+                    text="Rate (bpm)",
+                    font=dict(color=y3_color)
+                ),
+                tickfont=dict(color=y3_color),
+                anchor='free',
+                overlaying='y',
+                side='right',
+                position=0.9,
+                range=[0, y3_max],
+                showgrid=False,
+            ),
+            yaxis4=dict(
+                title=dict(
+                    text=y4_column,
+                    font=dict(color=y4_color)
+                ),
+                tickfont=dict(color=y4_color),
+                anchor='free',
+                overlaying='y',
+                side='right',
+                position=0.95,
+                range=[0, y4_max],
+                showgrid=False,
+            ),
+            legend=dict(
+                x=0.5,
+                y=1.15,
+                xanchor='center',
+                orientation='h'
+            ),
+            margin=dict(l=0, r=0, t=30, b=10),
+            autosize=True,
+            uirevision="main-live-plot",
+        )
 
-                if st.session_state['show_csv_boxes']:
-                    display_boxes(
-                        boxes_consumed_csv,
-                        total_boxes_csv,
-                        num_boxes_to_display_csv,
-                        label="Design (CSV)",
-                        container=boxes_placeholder_csv
-                    )
-                else:
-                    boxes_placeholder_csv.empty()
+        return fig
 
-                total_proppant_max_calc = st.session_state.calc_total_proppant_full.max()
-                total_boxes_calc = int(np.ceil(total_proppant_max_calc / 25000))
-                total_boxes_calc = max(1, total_boxes_calc)
-                boxes_consumed_calc = current_calc_total_proppant / 25000
-                num_boxes_to_display_calc = max(num_boxes_to_display_csv, min(total_boxes_calc, 30))
+    def render_box_swap_notice():
+        if time.time() >= st.session_state.get("box_swap_until", 0.0):
+            box_swap_placeholder.empty()
+            return
 
-                if st.session_state['show_calc_boxes']:
-                    display_boxes(
-                        boxes_consumed_calc,
-                        total_boxes_calc,
-                        num_boxes_to_display_calc,
-                        label="Calculated",
-                        container=boxes_placeholder_calc
-                    )
-                else:
-                    boxes_placeholder_calc.empty()
+        current_nonce = st.session_state.get("box_swap_audio_nonce", 0)
+        with box_swap_placeholder.container():
+            st.markdown("<h2 style='text-align: center; color: red;'>Box Swap</h2>", unsafe_allow_html=True)
+            if current_nonce != st.session_state.get("box_swap_audio_rendered_nonce", 0):
+                st.markdown(
+                    """
+                    <script>
+                    (function() {
+                        var beep = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+                        beep.play();
+                    })();
+                    </script>
+                    """,
+                    unsafe_allow_html=True
+                )
+                st.session_state["box_swap_audio_rendered_nonce"] = current_nonce
+
+    def render_live_panels():
+        fig = build_main_figure()
+        if fig is not None:
+            st.session_state.last_fig = fig
+            plot_placeholder.plotly_chart(fig, use_container_width=True, key="main_live_plot")
+        elif st.session_state.last_fig is not None:
+            plot_placeholder.plotly_chart(st.session_state.last_fig, use_container_width=True, key="main_live_plot")
         else:
-            st.write("Please start the simulation to see the plot and numerical values.")
+            with plot_placeholder.container():
+                st.write("Please start the simulation to see the plot and numerical values.")
+
+        metrics = get_current_metrics()
+        if metrics is None:
+            numerical_values_placeholder.empty()
+            boxes_placeholder_csv.empty()
+            boxes_placeholder_calc.empty()
+            render_box_swap_notice()
+            return
+
+        with numerical_values_placeholder.container():
+            cols = st.columns(9)
+            cols[0].markdown(colored_metric("Calc Prop Conc (ppa)", f"{metrics['calc_ppa_smooth']:.2f}", "orange"), unsafe_allow_html=True)
+            cols[1].markdown(colored_metric("Design Prop Conc (ppa)", f"{metrics['y6']:.2f}", "green"), unsafe_allow_html=True)
+            cols[2].markdown(colored_metric("Calc Clean Rate (bpm)", f"{metrics['calc_clean_rate']:.2f}", "#17becf"), unsafe_allow_html=True)
+            cols[3].markdown(colored_metric("Total Clean Vol (bbl)", f"{metrics['cumulative_clean_vol']:.0f}", cum_clean_vol_color), unsafe_allow_html=True)
+            cols[4].markdown(colored_metric(f"{y3_column} (bpm)", f"{metrics['y3']:.2f}", "blue"), unsafe_allow_html=True)
+            cols[5].markdown(colored_metric(f"{y4_column} (psi)", f"{metrics['y4']:.0f}", "red"), unsafe_allow_html=True)
+            cols[6].markdown(colored_metric("Design Prop Pumped (lbs)", f"{metrics['y5']:.0f}", "#808080"), unsafe_allow_html=True)
+            cols[7].markdown(colored_metric("Actual Prop Pumped (lbs)", f"{metrics['calc_total_proppant']:,.0f}", "orange"), unsafe_allow_html=True)
+            cols[8].markdown(colored_metric("Ahead / Behind (lbs)", f"{metrics['prop_diff']:,.0f}", "#9FE2BF"), unsafe_allow_html=True)
+
+        total_proppant_max_csv = data[y5_column].max()
+        total_boxes_csv = max(1, int(np.ceil(total_proppant_max_csv / 25000)))
+        boxes_consumed_csv = metrics['y5'] / 25000
+        num_boxes_to_display_csv = min(total_boxes_csv, 30)
+
+        if st.session_state['show_csv_boxes']:
+            display_boxes(
+                boxes_consumed_csv,
+                total_boxes_csv,
+                num_boxes_to_display_csv,
+                label="Design (CSV)",
+                container=boxes_placeholder_csv
+            )
+        else:
+            boxes_placeholder_csv.empty()
+
+        total_proppant_max_calc = st.session_state.calc_total_proppant_full.max()
+        total_boxes_calc = max(1, int(np.ceil(total_proppant_max_calc / 25000)))
+        boxes_consumed_calc = metrics['calc_total_proppant'] / 25000
+        num_boxes_to_display_calc = max(num_boxes_to_display_csv, min(total_boxes_calc, 30))
+
+        if st.session_state['show_calc_boxes']:
+            display_boxes(
+                boxes_consumed_calc,
+                total_boxes_calc,
+                num_boxes_to_display_calc,
+                label="Calculated",
+                container=boxes_placeholder_calc
+            )
+        else:
+            boxes_placeholder_calc.empty()
+
+        render_box_swap_notice()
+
+    @st.fragment(run_every=st.session_state.delay / 1000.0)
+    def live_region():
+        if st.session_state.running and not st.session_state.analysis_mode:
+            advance_simulation_step()
+
+        render_live_panels()
+
+    live_region()
 
     # ------------------ Analysis Mode / Plots ------------------
     if st.session_state.analysis_mode:
@@ -889,8 +844,14 @@ if uploaded_file is not None:
 
                 st.session_state["analysis_plots_created"] = True
 
-            for fig_analysis in st.session_state["analysis_figs"]:
-                st.plotly_chart(fig_analysis, use_container_width=True)
+            analysis_chart_keys = [
+                "analysis_prop_diff",
+                "analysis_total_prop",
+                "analysis_prop_conc",
+            ]
+            for idx, fig_analysis in enumerate(st.session_state["analysis_figs"]):
+                chart_key = analysis_chart_keys[idx] if idx < len(analysis_chart_keys) else f"analysis_chart_{idx}"
+                st.plotly_chart(fig_analysis, use_container_width=True, key=chart_key)
     else:
         analysis_placeholder.empty()
 
