@@ -3,8 +3,7 @@
 """
 Created on Wed Oct 17 11:29:15 2024
 
-Updates: adding in clear data button
-updating to stop plot flashing when data is plotted and enabling live analysis
+Updates: fixing plot flashing while data is being plotted
 
 @author: coltonhoward
 """
@@ -50,6 +49,25 @@ a {
 """
 
 st.markdown(footer, unsafe_allow_html=True)
+
+# Streamlit < 1.50 can visually flicker when Plotly charts rerender.
+# Mirror the upstream overflow fix locally so live updates are less jarring.
+plotly_flicker_fix_css = """
+<style>
+[data-testid="stPlotlyChart"] {
+    overflow: hidden !important;
+}
+[data-testid="stPlotlyChart"] > div {
+    overflow: hidden !important;
+}
+[data-testid="stPlotlyChart"] .js-plotly-plot,
+[data-testid="stPlotlyChart"] .plot-container,
+[data-testid="stPlotlyChart"] .svg-container {
+    overflow: hidden !important;
+}
+</style>
+"""
+st.markdown(plotly_flicker_fix_css, unsafe_allow_html=True)
 
 # Place the logo and title side by side
 col_logo, col_title = st.columns([1, 5])
